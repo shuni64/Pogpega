@@ -52,13 +52,37 @@ class Admin(commands.Cog):
     #         await ctx.response.send_message('Message not found', ephemeral=True)
 
     @commands.slash_command(name='alert_override', description='(Bot Admin Only) (be careful with this command) Manually override alert levels in the grief database')
-    async def manual_override(self, ctx: discord.ApplicationCommandInteraction, server_id: int, alert: str):
+    async def manual_override(self, ctx: discord.ApplicationCommandInteraction, channel_id: str, alert: str):
         grief_db = sqlite3.connect('grief.db')
         c = grief_db.cursor()
-        c.execute('UPDATE grief SET alert = ? WHERE server_id = ?', (alert, server_id))
+        c.execute('UPDATE grief SET alert = ? WHERE channel_id = ?', (alert, channel_id))
         grief_db.commit()
         grief_db.close()
-        await ctx.response.send_message(f'Overriding {server_id} with alert {alert}')
+        await ctx.response.send_message(f'Overriding {channel_id} with alert {alert}')
+    
+    @commands.slash_command(name='ego_override', description='(Bot Admin Only) (be careful with this command) Manually override ego data in the ego database')
+    async def ego_override(self, ctx: discord.ApplicationCommandInteraction, pxls_username: str, ego: str, canvas: bool = commands.Param(name='canvas', description='Whether to override the canvas ego (default: false)', default=False)):
+        db = sqlite3.connect('cogs/databases/db.db')
+        c = db.cursor()
+        if canvas:
+            c.execute('UPDATE canvasegos SET ego = ? WHERE pxls_username = ?', (ego, pxls_username))
+        else:
+            c.execute('UPDATE egos SET ego = ? WHERE pxls_username = ?', (ego, pxls_username))
+        db.commit()
+        db.close()
+        await ctx.response.send_message(f'Overriding {pxls_username} with ego {ego}')
+
+    @commands.slash_command(name='ego_delete', description='(Bot Admin Only) (be careful with this command) Delete ego data from the ego database')
+    async def ego_delete(self, ctx: discord.ApplicationCommandInteraction, pxls_username: str, canvas: bool = commands.Param(name='canvas', description='Whether to delete the canvas ego (default: false)', default=False)):
+        db = sqlite3.connect('cogs/databases/db.db')
+        c = db.cursor()
+        if canvas:
+            c.execute('DELETE FROM canvasegos WHERE pxls_username = ?', (pxls_username,))
+        else:
+            c.execute('DELETE FROM egos WHERE pxls_username = ?', (pxls_username,))
+        db.commit()
+        db.close()
+        await ctx.response.send_message(f'Deleted ego data for {pxls_username}')
 
     @commands.slash_command(name='infodownload', description='(Bot Admin Only) Download the info page from pxls.space')
     async def infodownload(self, ctx: discord.ApplicationCommandInteraction):

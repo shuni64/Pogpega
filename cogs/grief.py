@@ -6,11 +6,13 @@ import os
 import websockets
 import asyncio
 import json
-from clueless import hex_to_rgb, palettize_array
+from clueless import hex_to_rgb, palettize_array, get_style_from_name, templatize
 import aiohttp
 import numpy as np
 from io import BytesIO
 import time
+
+import boto3
 
 # TODO make the templates reset when the canvas resets (or just a command to reset them)
 # TODO Make a template progress cog, use that for the templates here
@@ -18,6 +20,16 @@ import time
 # TODO Let sticker be replaced
 # TODO If there is only 1 pixel at normal alert level, send the image
 # TODO Make help command
+# TODO add percentage tracking
+# TODO put percentage tracking and other tracking stuff in another file to be used across cogs
+# TODO make avogadro cog
+
+AWS_ACCESS_KEY = os.environ['AWS_ACCESS_KEY']
+AWS_SECRET_KEY = os.environ['AWS_SECRET_KEY']
+AWS_REGION = os.environ['AWS_REGION']
+s3 = boto3.client('s3', aws_access_key_id=AWS_ACCESS_KEY, aws_secret_access_key=AWS_SECRET_KEY, region_name=AWS_REGION)
+BUCKET_PRIVATE = os.environ['BUCKET_PRIVATE']
+BUCKET_PUBLIC = os.environ['BUCKET_PUBLIC']
 
 pxls_auth = os.environ['PXLS_AUTH']
 BOT_ADMINS = [int(admin) for admin in os.environ['BOT_ADMINS'].split(',')]
@@ -33,18 +45,20 @@ cur.close()
 db_grief = sqlite3.connect('cogs/databases/grief.db')
 cur = db_grief.cursor()
 # cur.execute('DROP TABLE IF EXISTS grief')
-cur.execute('CREATE TABLE IF NOT EXISTS grief (server_id, channel_id, x, y, enabled, alert)')
+cur.execute('CREATE TABLE IF NOT EXISTS grief (server_id, channel_id, x, y, enabled, alert, virgin)')
 db_grief.commit()
 cur.close()
-
 
 class Grief(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.load_images()
         self.refresh_palette()
+        # self.avo_map = Image.open('other/avogadro/avogadro_map.png')
+        # self.avo_res = None
         self.alerts = {}
         self.send_alerts.start()
+        # self.update_avogadro.start()
 
     async def websock(self):
         print('Connecting to pxls.space websocket')
@@ -81,9 +95,14 @@ class Grief(commands.Cog):
         self.colors = colors_dict
         self.colors_to_index = {v: k for k, v in colors_dict.items()}
 
-    async def send_grief_alert(self, pixel: dict, alert: int):
+    async def send_grief_alert(self, pixel: dict, alert: int, virgin: bool):
         x = pixel['x']
         y = pixel['y']
+        print(self.virginmap.getpixel((x, y)))
+        print(virgin)
+        if not virgin and self.virginmap.getpixel((x, y)) == self.colors[255]:
+            print(f'Devirgin detected at {x}, {y}')
+            return
         color = self.colors[pixel['color']]
         print(f'\nGrief detected at {x}, {y}')
         template = self.templates[alert]
@@ -173,14 +192,13 @@ class Grief(commands.Cog):
         await asyncio.sleep(wanted - current)
 
 
-    async def fetch_board(self) -> Image:
+    async def fetch_board(self) -> tuple[Image, Image]:
         headers = {
             "x-pxls-cfauth": pxls_auth
         }
         async with aiohttp.ClientSession() as session:
             async with session.get("https://pxls.space/boarddata", headers=headers) as response:
                 data = await response.content.read()
-                # TODO put this in a try except to prevent reshaping errors
                 try:
                     arr = np.asarray(list(data), dtype=np.uint8).reshape(
                     self.info["height"], self.info["width"]
@@ -195,11 +213,17 @@ class Grief(commands.Cog):
                     arr = np.asarray(list(data), dtype=np.uint8).reshape(
                     self.info["height"], self.info["width"]
                     )
-                arr = palettize_array(arr, self.palette)
-                return Image.fromarray(arr, mode='RGBA')
+                board = Image.fromarray(palettize_array(arr, self.palette), mode='RGBA')
+                async with session.get("https://pxls.space/virginmap", headers = headers) as response2:
+                    data = await response2.content.read()
+                    arr2 = np.asarray(list(data), dtype=np.uint8).reshape(
+                    self.info["height"], self.info["width"]
+                    )
+                    virginmap = Image.fromarray(palettize_array(arr2, self.palette), mode='RGBA')
+                    return board, virginmap
                 
     async def cog_load(self) -> None:
-        self.board = await self.fetch_board()
+        self.board, self.virginmap = await self.fetch_board()
         self.task = asyncio.create_task(self.websock())
 
     def load_images(self): # TODO Palettize the images into index arrays
@@ -212,7 +236,7 @@ class Grief(commands.Cog):
             # image = palettize_array(img, palette)
             # image = Image.fromarray(image)
             # image.save(f'cogs/templates/{row[0]}_but_worse.png')
-            self.templates[row[1]] = (img, row[1], row[2], row[3], row[5])
+            self.templates[row[1]] = (img, row[1], row[2], row[3], row[5], bool(row[6]))
         c.close()
 
     @commands.slash_command(name='refresh_board', description='(Bot Admin Only) Refresh the board')
@@ -221,7 +245,7 @@ class Grief(commands.Cog):
         if ctx.author.id not in BOT_ADMINS:
             await ctx.response.send_message('<a:nuhuh:1262041901440303157> You do not have permission to use this command', ephemeral=True)
             return
-        self.board = await self.fetch_board()
+        self.board, self.virginmap = await self.fetch_board()
         await ctx.response.send_message('Board refreshed')
     
     @commands.slash_command(name='refresh_grief', description='(Bot Admin Only) Refresh the pxls websocket')
@@ -241,6 +265,14 @@ class Grief(commands.Cog):
         img.save(b, 'PNG')
         b.seek(0)
         await ctx.response.send_message(file=discord.File(b, 'board.png'))
+
+    @commands.slash_command(name='get_virginmap', description='Get the current virginmap')
+    async def get_virginmap(self, ctx: discord.ApplicationCommandInteraction):
+        img = self.virginmap.copy()
+        b = BytesIO()
+        img.save(b, 'PNG')
+        b.seek(0)
+        await ctx.response.send_message(file=discord.File(b, 'virginmap.png'))
 
     @commands.slash_command()
     async def grief(self, ctx: discord.ApplicationCommandInteraction):
@@ -311,17 +343,21 @@ class Grief(commands.Cog):
         # image = reduce(image, PALETTE)
         # img = Image.open(f'cogs/templates/{ctx.guild.id}.png')
         
-        c = db_grief.cursor()
         # Check if the template already exists and get the alert level
+        c = db_grief.cursor()
         template = c.execute('SELECT * FROM grief WHERE server_id = ?', (ctx.guild.id,)).fetchone()
         if template is not None:
+            print('Existing template found, keeping alert level and virgin tracking')
             alert = template[5]
+            virgin = template[6]
         else:
             alert = 'normal'
+            virgin = True
+        
         # Update the template
-        self.templates[channel_id] = (image, channel_id, x, y, alert)
+        self.templates[channel_id] = (image, channel_id, x, y, alert, virgin)
         c.execute('DELETE FROM grief WHERE channel_id = ?', (channel_id,))
-        c.execute('INSERT INTO grief VALUES (?, ?, ?, ?, ?, ?)', (ctx.guild.id, channel_id, x, y, True, alert))
+        c.execute('INSERT INTO grief VALUES (?, ?, ?, ?, ?, ?, ?)', (ctx.guild.id, channel_id, x, y, True, alert, virgin))
         db_grief.commit()
         c.close()
         await ctx.response.send_message('Template set')
@@ -329,14 +365,24 @@ class Grief(commands.Cog):
     @grief.sub_command(name='deletetemplate', description='Delete a template from the grief alert')
     async def deletetemplate(self, ctx: discord.ApplicationCommandInteraction,
                              channel: discord.TextChannel = commands.Param(name='channel', description='The channel to delete the template from', default=None)):
+        # Check permissions
         if not await self.check_role(ctx):
             return
         if channel is not None:
             channel_id = channel.id
         else:
             channel_id = ctx.channel.id
+
+        # Remove the template from the cache
         self.templates.pop(channel_id, None)
-        # Delete the template
+
+        # Remove the template from the database
+        c = db_grief.cursor()
+        c.execute('DELETE FROM grief WHERE channel_id = ?', (channel_id,))
+        db_grief.commit()
+        c.close()
+
+        # Delete the template image
         try:
             os.remove(f'cogs/templates/{channel_id}.png')
         except FileNotFoundError:
@@ -348,37 +394,45 @@ class Grief(commands.Cog):
     async def enable(self, 
                      ctx: discord.ApplicationCommandInteraction,
                      channel: discord.TextChannel = commands.Param(name='channel', description='The channel to enable the grief alert in', default=None)):
+        # Check permissions
         if not await self.check_role(ctx):
             return
         if channel is not None:
             channel_id = channel.id
         else:
             channel_id = ctx.channel.id
-        # Enable the grief alert
+
+        # Enable the grief alert in the database
         c = db_grief.cursor()
         c.execute('UPDATE grief SET enabled = ? WHERE channel_id = ?', (True, channel_id))
         db_grief.commit()
         template = c.execute('SELECT * FROM grief WHERE channel_id = ?', (channel_id,)).fetchall()
         c.close()
+
+        # Enable the grief alert in the cache
         image = Image.open(f'cogs/templates/{channel_id}.png')
-        self.templates[channel_id] = (image, template[0][1], template[0][2], template[0][3], template[0][5])
+        self.templates[channel_id] = (image, template[0][1], template[0][2], template[0][3], template[0][5], template[0][6])
         await ctx.response.send_message('Grief alert enabled')
 
     @grief.sub_command(name='disable', description='Disable the grief alert')
     async def disable(self, 
                       ctx: discord.ApplicationCommandInteraction,
                       channel: discord.TextChannel = commands.Param(name='channel', description='The channel to disable the grief alert in', default=None)):
+        # Check permissions
         if not await self.check_role(ctx):
             return
         if channel is not None:
             channel_id = channel.id
         else:
             channel_id = ctx.channel.id
-        # Disable the grief alert
+
+        # Disable the grief alert in the database
         c = db_grief.cursor()
         c.execute('UPDATE grief SET enabled = ? WHERE channel_id = ?', (False, channel_id))
         db_grief.commit()
         c.close()
+
+        # Disable the grief alert in the cache
         self.templates.pop(channel_id, None)
         await ctx.response.send_message('Grief alert disabled')
 
@@ -387,15 +441,19 @@ class Grief(commands.Cog):
             ctx: discord.ApplicationCommandInteraction, 
             alert: str = commands.Param(name='alert', description='The alert level', choices=['normal', 'high', 'realtime']),
             channel: discord.TextChannel = commands.Param(name='channel', description='The channel to set the alert level for', default=None)):
+        # Check permissions
         if not await self.check_role(ctx):
             return
         if channel is not None:
             channel_id = channel.id
         else:
             channel_id = ctx.channel.id
-        # Set the alert level
+
+        # Set the alert level in the cache
         template = self.templates[channel_id]
-        self.templates[channel_id] = (template[0], template[1], template[2], template[3], alert)
+        self.templates[channel_id] = (template[0], template[1], template[2], template[3], alert, template[5])
+
+        # Set the alert level in the database
         c = db_grief.cursor()
         c.execute('UPDATE grief SET alert = ? WHERE channel_id = ?', (alert, channel_id))
         db_grief.commit()
@@ -406,23 +464,50 @@ class Grief(commands.Cog):
     async def alertlevels(self, ctx: discord.ApplicationCommandInteraction):
         embed = discord.Embed()
         embed.title = 'Alert Levels'
-        embed.add_field(name='Normal', value='Grief alerts are sent in batches at 5 minute intervals', inline=False)
+        embed.add_field(name='Normal', value='Grief alerts are sent in batches at 5 minute intervals. Does not work with virgin pixel masking', inline=False)
         embed.add_field(name='High', value='Grief alerts are sent for each pixel after 5 seconds, to prevent undos from triggering the alert', inline=False)
         embed.add_field(name='Realtime', value='Grief alerts are sent as soon as a pixel is detected, including pixels that are undone', inline=False)
         embed.color = EMBED_COLOR
         await ctx.response.send_message(embed=embed)
 
+    @grief.sub_command(name='virgin', description='Set tracking of griefs on virgin pixels')
+    async def virgin(self, 
+                     ctx: discord.ApplicationCommandInteraction,
+                     virgin: bool = commands.Param(name='virgin', description='Whether to track griefs on virgin pixels'),
+                     channel: discord.TextChannel = commands.Param(name='channel', description='The channel to set virgin pixel tracking for', default=None)):
+        # Check permissions
+        if not await self.check_role(ctx):
+            return
+        if channel is not None:
+            channel_id = channel.id
+        else:
+            channel_id = ctx.channel.id
+
+        # Toggle virgin pixel tracking in the database
+        c = db_grief.cursor()
+        c.execute('UPDATE grief SET virgin = ? WHERE channel_id = ?', (virgin, channel_id,))
+        db_grief.commit()
+        c.close()
+
+        # Toggle virgin pixel tracking in the cache
+        template = self.templates[channel_id]
+        self.templates[channel_id] = (template[0], template[1], template[2], template[3], template[4], virgin)
+
+        await ctx.response.send_message('Virgin pixel tracking updated')
+
     async def check_griefs(self, pixel: dict, color: tuple):
         x = pixel['x']
         y = pixel['y']
-        for server, template in self.templates.items():
+        for channel, template in self.templates.items():
             if self.check_grief(template, x, y, color):
                 if template[4] == 'realtime':
-                    await self.send_grief_alert(pixel, server)
+                    await self.send_grief_alert(pixel, channel, template[5])
                 elif template[4] == 'high':
-                    task = asyncio.create_task(self.check_undo(template, x, y, server))
+                    task = asyncio.create_task(self.check_undo(template, x, y, channel))
                 elif template[4] == 'normal':
-                    self.add_to_dict(server, pixel)
+                    self.add_to_dict(channel, pixel)
+        # Update the virginmap
+        self.virginmap.putpixel((x, y), self.colors[0])
 
 
     def check_grief(self, template: tuple, x: int, y: int, color: tuple) -> bool:
@@ -448,7 +533,7 @@ class Grief(commands.Cog):
             except KeyError:
                 print('Error in check_undo')
                 return
-            await self.send_grief_alert({'x': x, 'y': y, 'color': color}, server)
+            await self.send_grief_alert({'x': x, 'y': y, 'color': color}, server, template[5])
         else:
             print('Undo detected')
     
@@ -463,10 +548,10 @@ class Grief(commands.Cog):
                 return color['name']
         return 'Unknown'
     
-    def add_to_dict(self, server: int, pixel: dict):
-        if server not in self.alerts:
-            self.alerts[server] = []
-        self.alerts[server].append(pixel)
+    def add_to_dict(self, channel: int, pixel: dict):
+        if channel not in self.alerts:
+            self.alerts[channel] = []
+        self.alerts[channel].append(pixel)
 
     async def check_role(self, ctx: discord.ApplicationCommandInteraction):
         # Check if the user has permission to use this command
@@ -483,6 +568,77 @@ class Grief(commands.Cog):
             return False
         return True
     
+    # @tasks.loop(seconds=900)
+    # async def update_avogadro(self):
+    #     try:
+    #         old_result = self.avo_res.copy()
+    #     except AttributeError:
+    #         old_result = Image.open(BytesIO(s3.get_object(
+    #         Bucket=BUCKET_PUBLIC,
+    #         Key='avogadro_detemp.png'
+    #         )['Body'].read()))
+    #     result = Image.new('RGBA', (self.avo_map.width, self.avo_map.height))
+    #     for x in range(self.avo_map.width):
+    #         for y in range(self.avo_map.height):
+    #             map_pixel = self.avo_map.getpixel((x, y))
+    #             if map_pixel == (0, 0, 0, 0):  # Transparent pixel
+    #                 continue
+    #             try:
+    #                 board_pixel = self.board.getpixel((256 * (map_pixel[2] % 16) + map_pixel[0], 256 * (map_pixel[2] // 16) + map_pixel[1]))
+    #             except IndexError:
+    #                 print(f"IndexError at ({x}, {y}) with pixel {map_pixel}")
+    #                 continue
+    #             result.putpixel((x, y), (board_pixel[0], board_pixel[1], board_pixel[2], 255))
+    #     old_result = old_result.getdata()
+    #     self.avo_res = result
+    #     result = result.getdata()
+    #     changes = 0
+    #     try:
+    #         for i in range(len(result)):
+    #             if result[i] != old_result[i]:
+    #                 changes += 1
+    #     except IndexError:
+    #         print('IndexError in update_avogadro, probably due to a new canvas')
+    #         changes = 1
+    #     if changes > 0:
+    #         # Templatize the image
+    #         style = get_style_from_name('custom')
+    #         arr = templatize(style, self.avo_res, self.palette)
+    #         templatized = Image.fromarray(arr, mode='RGBA')
+
+    #         with BytesIO() as output:
+    #             self.avo_res.save(output, format='PNG')
+    #             s3.put_object(
+    #                 Bucket=BUCKET_PUBLIC,
+    #                 Key='avogadro_detemp.png',
+    #                 Body=output.getvalue(),
+    #                 ContentType='image/png'
+    #             )
+    #         with BytesIO() as output:
+    #             templatized.save(output, format='PNG')
+    #             s3.put_object(
+    #                 Bucket=BUCKET_PUBLIC,
+    #                 Key='avogadro.png',
+    #                 Body=output.getvalue(),
+    #                 ContentType='image/png'
+    #             )
+    #         print(f'Avogadro map updated with {changes} changes')
+    #     await self.bot.change_presence(activity=discord.Activity(
+    #             type=discord.ActivityType.watching,
+    #             name=f'{changes} pixels change'
+    #         ))
+            
+
+    # @update_avogadro.before_loop
+    # async def before_update_avogadro(self):
+    #     await self.bot.wait_until_ready()
+    #     # Calculate the time until the next 5 minute mark
+    #     current = time.time()
+    #     wanted = current - (current % 900) + 900
+    #     print('Waiting for ', wanted - current, 's to update avogadro')
+    #     await asyncio.sleep(wanted - current)
+    
+
 # TODO make this actually good
 def crop_grief_image(image: Image, x: int, y: int) -> Image:
     WIDTH = 15

@@ -10,7 +10,7 @@ dotenv.load_dotenv()
 
 ADMINS = [int(admin) for admin in os.environ['BOT_ADMINS'].split(',')]
 
-bot = commands.InteractionBot()#test_guilds=[int(server) for server in os.environ['DISCORD_TEST_SERVERS'].split(',')])
+bot = commands.InteractionBot(default_contexts=discord.InteractionContextTypes.all())#test_guilds=[int(server) for server in os.environ['DISCORD_TEST_SERVERS'].split(',')])
 
 @bot.event
 async def on_ready():
