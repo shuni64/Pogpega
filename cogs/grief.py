@@ -55,10 +55,10 @@ class Grief(commands.Cog):
         self.load_images()
         self.refresh_palette()
         # self.avo_map = Image.open('other/avogadro/avogadro_map.png')
-        # self.avo_res = None
+        self.avo_res = None
         self.alerts = {}
         self.send_alerts.start()
-        # self.update_avogadro.start()
+        self.update_avogadro.start()
 
     async def websock(self):
         print('Connecting to pxls.space websocket')
@@ -567,77 +567,304 @@ class Grief(commands.Cog):
             await ctx.response.send_message('Role not set', ephemeral=True)
             return False
         return True
-    
-    # @tasks.loop(seconds=900)
-    # async def update_avogadro(self):
-    #     try:
-    #         old_result = self.avo_res.copy()
-    #     except AttributeError:
-    #         old_result = Image.open(BytesIO(s3.get_object(
-    #         Bucket=BUCKET_PUBLIC,
-    #         Key='avogadro_detemp.png'
-    #         )['Body'].read()))
-    #     result = Image.new('RGBA', (self.avo_map.width, self.avo_map.height))
-    #     for x in range(self.avo_map.width):
-    #         for y in range(self.avo_map.height):
-    #             map_pixel = self.avo_map.getpixel((x, y))
-    #             if map_pixel == (0, 0, 0, 0):  # Transparent pixel
-    #                 continue
-    #             try:
-    #                 board_pixel = self.board.getpixel((256 * (map_pixel[2] % 16) + map_pixel[0], 256 * (map_pixel[2] // 16) + map_pixel[1]))
-    #             except IndexError:
-    #                 print(f"IndexError at ({x}, {y}) with pixel {map_pixel}")
-    #                 continue
-    #             result.putpixel((x, y), (board_pixel[0], board_pixel[1], board_pixel[2], 255))
-    #     old_result = old_result.getdata()
-    #     self.avo_res = result
-    #     result = result.getdata()
-    #     changes = 0
-    #     try:
-    #         for i in range(len(result)):
-    #             if result[i] != old_result[i]:
-    #                 changes += 1
-    #     except IndexError:
-    #         print('IndexError in update_avogadro, probably due to a new canvas')
-    #         changes = 1
-    #     if changes > 0:
-    #         # Templatize the image
-    #         style = get_style_from_name('custom')
-    #         arr = templatize(style, self.avo_res, self.palette)
-    #         templatized = Image.fromarray(arr, mode='RGBA')
 
-    #         with BytesIO() as output:
-    #             self.avo_res.save(output, format='PNG')
-    #             s3.put_object(
-    #                 Bucket=BUCKET_PUBLIC,
-    #                 Key='avogadro_detemp.png',
-    #                 Body=output.getvalue(),
-    #                 ContentType='image/png'
-    #             )
-    #         with BytesIO() as output:
-    #             templatized.save(output, format='PNG')
-    #             s3.put_object(
-    #                 Bucket=BUCKET_PUBLIC,
-    #                 Key='avogadro.png',
-    #                 Body=output.getvalue(),
-    #                 ContentType='image/png'
-    #             )
-    #         print(f'Avogadro map updated with {changes} changes')
-    #     await self.bot.change_presence(activity=discord.Activity(
-    #             type=discord.ActivityType.watching,
-    #             name=f'{changes} pixels change'
-    #         ))
+    def get_avogadro_params(self):
+        try:
+            with open('cogs/databases/avogadro.json', 'r') as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {
+                "inner_radius": 70,
+                "warp_width": 45,
+                "source_radius": 700,
+                "scaling_parameter": -0.1,
+                "center_x": None,
+                "center_y": None,
+                "mask": True
+            }
+    
+    @tasks.loop(seconds=900)
+    async def update_avogadro(self):
+        try:
+            old_result = self.avo_res.copy()
+        except AttributeError:
+            try:
+                old_result = Image.open(BytesIO(s3.get_object(
+                    Bucket=BUCKET_PUBLIC,
+                    Key='avogadro_detemp.png'
+                )['Body'].read()))
+            except Exception:
+                old_result = None
+
+        params = self.get_avogadro_params()
+        center = None
+        if params['center_x'] is not None and params['center_y'] is not None:
+            center = (params['center_x'], params['center_y'])
+
+        # Apply black hole warp to the board
+        result = self.black_hole_warp(
+            self.board,
+            inner_radius=params['inner_radius'],
+            warp_width=params['warp_width'],
+            source_radius=params['source_radius'],
+            scaling_parameter=params['scaling_parameter'],
+            center=center,
+            black_hole_mask=params['mask']
+        )
+
+        center_img_path = 'cogs/databases/avogadro_center.png'
+        if os.path.exists(center_img_path):
+            try:
+                mask_img = Image.open(center_img_path).convert("RGBA")
+                result = self.mask_overlay(result, mask_img, center)
+            except Exception as e:
+                print(f"Failed to overlay avogadro center image: {e}")
+
+        old_data = old_result.getdata() if old_result else None
+        self.avo_res = result
+        new_data = result.getdata()
+        
+        changes = 0
+        if old_data:
+            try:
+                for i in range(len(new_data)):
+                    if new_data[i] != old_data[i]:
+                        changes += 1
+            except IndexError:
+                print('IndexError in update_avogadro, probably due to a new canvas')
+                changes = 1
+        else:
+            changes = 1
+
+        if changes > 0:
+            # Templatize the image
+            style = get_style_from_name('custom')
+            arr = templatize(style, self.avo_res, self.palette)
+            templatized = Image.fromarray(arr, mode='RGBA')
+
+            with BytesIO() as output:
+                self.avo_res.save(output, format='PNG')
+                s3.put_object(
+                    Bucket=BUCKET_PUBLIC,
+                    Key='avogadro_detemp.png',
+                    Body=output.getvalue(),
+                    ContentType='image/png'
+                )
+            with BytesIO() as output:
+                templatized.save(output, format='PNG')
+                s3.put_object(
+                    Bucket=BUCKET_PUBLIC,
+                    Key='avogadro.png',
+                    Body=output.getvalue(),
+                    ContentType='image/png'
+                )
+            print(f'Avogadro updated with {changes} changes')
+
+        await self.bot.change_presence(activity=discord.Activity(
+                type=discord.ActivityType.watching,
+                name=f'{changes} pixels change'
+            ))
+
+    @update_avogadro.before_loop
+    async def before_update_avogadro(self):
+        await self.bot.wait_until_ready()
+        # Calculate the time until the next 5 minute mark
+        current = time.time()
+        wanted = current - (current % 900) + 900
+        print('Waiting for ', wanted - current, 's to update avogadro')
+        await asyncio.sleep(wanted - current)
+    
+    @commands.slash_command(name='set_avogadro_params', description='(Bot Admin Only) Change parameters used for the regular avogadro updates')
+    async def set_avogadro_params(self, ctx: discord.ApplicationCommandInteraction,
+                       inner_radius: int = commands.Param(description='Inner radius of the black hole'),
+                       warp_width: int = commands.Param(description='Width of the warping band'),
+                       source_radius: int = commands.Param(description='Radius from which light is drawn'),
+                       scaling_parameter: float = commands.Param(description='Scaling parameter (e.g., -0.09)'),
+                       center: str = commands.Param(description='Center of the black hole (x,y)', default=None),
+                       mask: bool = commands.Param(description='Whether to add a black hole mask', default=False),
+                       center_image: discord.Attachment = commands.Param(description='Image to overlay in the center', default=None)):
+        
+        if ctx.author.id not in BOT_ADMINS:
+            await ctx.response.send_message('<a:nuhuh:1262041901440303157> You do not have permission to use this command', ephemeral=True)
+            return
+
+        cx, cy = None, None
+        if center:
+            try:
+                cx, cy = map(int, center.split(','))
+            except ValueError:
+                await ctx.response.send_message('Invalid center format. Please use "x,y" (e.g. 500,500).', ephemeral=True)
+                return
+                
+        if center_image:
+            if center_image.content_type not in ['image/png', 'image/jpeg', 'image/webp']:
+                await ctx.response.send_message('Please provide a valid center image (PNG/JPEG/WEBP).', ephemeral=True)
+                return
+            await center_image.save('cogs/databases/avogadro_center.png')
+
+        params = {
+            "inner_radius": inner_radius,
+            "warp_width": warp_width,
+            "source_radius": source_radius,
+            "scaling_parameter": scaling_parameter,
+            "center_x": cx,
+            "center_y": cy,
+            "mask": mask
+        }
+
+        # os.makedirs('cogs/databases', exist_ok=True)
+        with open('cogs/databases/avogadro.json', 'w') as f:
+            json.dump(params, f, indent=4)
+
+        await ctx.response.send_message(f'Avogadro parameters updated successfully:\n```json\n{json.dumps(params, indent=4)}\n```', ephemeral=True)
+
+    def black_hole_warp(
+        self,
+        img: Image.Image,
+        inner_radius: int,
+        warp_width: int,
+        source_radius: int,
+        scaling_parameter: float,
+        center = None,
+        black_hole_mask: bool = False
+    ) -> Image.Image:
+        arr = np.array(img)
+        h, w, _ = arr.shape
+
+        if center is None:
+            cx, cy = w / 2, h / 2
+        else:
+            cx, cy = center
+
+        outer_radius = inner_radius + warp_width
+
+        y, x = np.indices((h, w))
+        dx = x - cx
+        dy = y - cy
+
+        r = np.sqrt(dx**2 + dy**2)
+        theta = np.arctan2(dy, dx)
+
+        band = (r > inner_radius) & (r < outer_radius)
+        r_new = np.empty_like(r)
+
+        t = (np.exp(scaling_parameter * r) - np.exp(scaling_parameter * inner_radius)) / (np.exp(scaling_parameter * outer_radius) - np.exp(scaling_parameter * inner_radius))
+        displacement = source_radius + t * (outer_radius - source_radius)
+
+        displacement[np.invert(band)] = 0
+        r_new[band] = displacement[band]
+        # r_new[~band] = r[~band]
+
+        src_x = cx + r_new * np.cos(theta)
+        src_y = cy + r_new * np.sin(theta)
+
+        src_x = np.rint(src_x).astype(int)
+        src_y = np.rint(src_y).astype(int)
+
+        valid = (
+            (src_x >= 0) & (src_x < w) &
+            (src_y >= 0) & (src_y < h)
+        )
+
+        warped = np.zeros_like(arr)
+        warped[valid] = arr[src_y[valid], src_x[valid]]
+        valid &= (warped[..., 3] > 0)
+
+        # result = arr.copy()
+        # result[band & valid] = warped[band & valid]
+        result = np.zeros_like(arr)
+        result[band & valid] = warped[band & valid]
+
+        if black_hole_mask:
+            result[r < inner_radius] = [0, 0, 0, 255]
+
+        res_img = Image.fromarray(result)
+    
+        # Trim transparency
+        bbox = res_img.getbbox()
+        if bbox:
+            res_img = res_img.crop(bbox)
+
+        return res_img
+
+    def mask_overlay(self, base_img: Image.Image, overlay_img: Image.Image, center=None) -> Image.Image:
+        # Ensure overlay is RGBA
+        overlay = overlay_img.convert("RGBA")
+        base = base_img.convert("RGBA")
+
+        # Create a blank image for the result
+        result = Image.new("RGBA", base.size)
+
+        # Paste the base image
+        result.paste(base, (0, 0))
+
+        # Calculate top-left corner for centering the overlay
+        ox, oy = overlay.size
+        cx, cy = center if center else (base.size[0] / 2, base.size[1] / 2)
+        top_left = (int(cx - ox / 2)+1, int(cy - oy / 2)+3)
+
+        # Paste the overlay using its alpha channel as mask
+        result.paste(overlay, top_left, mask=overlay)
+
+        return result
+
+    @commands.slash_command(name='avogadro', description='Create an avogadro black hole of an image')
+    async def avogadro(self, ctx: discord.ApplicationCommandInteraction,
+                       image: discord.Attachment = commands.Param(description='The image to warp'),
+                       inner_radius: int = commands.Param(description='Inner radius of the black hole'),
+                       warp_width: int = commands.Param(description='Width of the warping band'),
+                       source_radius: int = commands.Param(description='Radius from which light is drawn'),
+                       scaling_parameter: float = commands.Param(description='Scaling parameter (e.g., -0.09)'),
+                       center: str = commands.Param(description='Center of the black hole (x,y)', default=None),
+                       black_hole_mask: discord.Attachment = commands.Param(description='Image to overlay in the center', default=None)):
+        
+        if image.content_type not in ['image/png', 'image/jpeg', 'image/webp']:
+            await ctx.response.send_message('Please provide a valid image (PNG/JPEG/WEBP).', ephemeral=True)
+            return
+
+        parsed_center = None
+        if center:
+            try:
+                x, y = map(int, center.split(','))
+                parsed_center = (x, y)
+            except ValueError:
+                await ctx.response.send_message('Invalid center format. Please use "x,y" (e.g. 500,500).', ephemeral=True)
+                return
+
+        await ctx.response.defer()
+        
+        try:
+            img_bytes = await image.read()
+            img = Image.open(BytesIO(img_bytes)).convert("RGBA")
+
+            if black_hole_mask is not None:
+                the_thing = True
+            else:
+                the_thing = False
             
+            result_img = self.black_hole_warp(
+                img, 
+                inner_radius, 
+                warp_width, 
+                source_radius, 
+                scaling_parameter, 
+                center=parsed_center,
+                black_hole_mask=the_thing
+            )
 
-    # @update_avogadro.before_loop
-    # async def before_update_avogadro(self):
-    #     await self.bot.wait_until_ready()
-    #     # Calculate the time until the next 5 minute mark
-    #     current = time.time()
-    #     wanted = current - (current % 900) + 900
-    #     print('Waiting for ', wanted - current, 's to update avogadro')
-    #     await asyncio.sleep(wanted - current)
-    
+            if black_hole_mask:
+                mask_bytes = await black_hole_mask.read()
+                mask_img = Image.open(BytesIO(mask_bytes)).convert("RGBA")
+                result_img = self.mask_overlay(result_img, mask_img, parsed_center)
+            
+            with BytesIO() as b:
+                result_img.save(b, 'PNG')
+                b.seek(0)
+                await ctx.edit_original_message(file=discord.File(b, 'avogadro.png'))
+                
+        except Exception as e:
+            await ctx.edit_original_message(content=f"An error occurred: {str(e)}")
+
 
 # TODO make this actually good
 def crop_grief_image(image: Image, x: int, y: int) -> Image:
