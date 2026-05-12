@@ -100,9 +100,12 @@ class Grief(commands.Cog):
         y = pixel['y']
         print(self.virginmap.getpixel((x, y)))
         print(virgin)
+        print(self.colors[255])
         if not virgin and self.virginmap.getpixel((x, y)) == self.colors[255]:
+            self.virginmap.putpixel((x, y), self.colors[0])
             print(f'Devirgin detected at {x}, {y}')
             return
+        self.virginmap.putpixel((x, y), self.colors[0])
         color = self.colors[pixel['color']]
         print(f'\nGrief detected at {x}, {y}')
         template = self.templates[alert]
@@ -498,16 +501,22 @@ class Grief(commands.Cog):
     async def check_griefs(self, pixel: dict, color: tuple):
         x = pixel['x']
         y = pixel['y']
+        # print(f'Pre-check: {self.virginmap.getpixel((x, y))}')
+        griefed = False
         for channel, template in self.templates.items():
             if self.check_grief(template, x, y, color):
+                griefed = True
                 if template[4] == 'realtime':
                     await self.send_grief_alert(pixel, channel, template[5])
                 elif template[4] == 'high':
                     task = asyncio.create_task(self.check_undo(template, x, y, channel))
                 elif template[4] == 'normal':
                     self.add_to_dict(channel, pixel)
+                    self.virginmap.putpixel((x, y), self.colors[0])
+        if griefed:
+            self.virginmap.putpixel((x, y), self.colors[0])
         # Update the virginmap
-        self.virginmap.putpixel((x, y), self.colors[0])
+        # self.virginmap.putpixel((x, y), self.colors[0])
 
 
     def check_grief(self, template: tuple, x: int, y: int, color: tuple) -> bool:
@@ -576,10 +585,10 @@ class Grief(commands.Cog):
             return {
                 "inner_radius": 70,
                 "warp_width": 45,
-                "source_radius": 700,
+                "source_radius": 800,
                 "scaling_parameter": -0.1,
-                "center_x": None,
-                "center_y": None,
+                "center_x": 864,
+                "center_y": 877,
                 "mask": True
             }
     
@@ -616,7 +625,7 @@ class Grief(commands.Cog):
         if os.path.exists(center_img_path):
             try:
                 mask_img = Image.open(center_img_path).convert("RGBA")
-                result = self.mask_overlay(result, mask_img, center)
+                result = self.mask_overlay(result, mask_img, None)
             except Exception as e:
                 print(f"Failed to overlay avogadro center image: {e}")
 
@@ -648,7 +657,8 @@ class Grief(commands.Cog):
                     Bucket=BUCKET_PUBLIC,
                     Key='avogadro_detemp.png',
                     Body=output.getvalue(),
-                    ContentType='image/png'
+                    ContentType='image/png',
+                    CacheControl='public, max-age=60'
                 )
             with BytesIO() as output:
                 templatized.save(output, format='PNG')
@@ -656,7 +666,8 @@ class Grief(commands.Cog):
                     Bucket=BUCKET_PUBLIC,
                     Key='avogadro.png',
                     Body=output.getvalue(),
-                    ContentType='image/png'
+                    ContentType='image/png',
+                    CacheControl='public, max-age=60'
                 )
             print(f'Avogadro updated with {changes} changes')
 
