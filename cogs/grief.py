@@ -807,7 +807,7 @@ class Grief(commands.Cog):
         # Calculate top-left corner for centering the overlay
         ox, oy = overlay.size
         cx, cy = center if center else (base.size[0] / 2, base.size[1] / 2)
-        top_left = (int(cx - ox / 2)+1, int(cy - oy / 2)+3)
+        top_left = (int(cx - ox / 2), int(cy - oy / 2)+2)
 
         # Paste the overlay using its alpha channel as mask
         result.paste(overlay, top_left, mask=overlay)
