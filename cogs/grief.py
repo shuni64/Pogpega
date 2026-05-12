@@ -95,17 +95,10 @@ class Grief(commands.Cog):
         self.colors = colors_dict
         self.colors_to_index = {v: k for k, v in colors_dict.items()}
 
-    async def send_grief_alert(self, pixel: dict, alert: int, virgin: bool):
+    async def send_grief_alert(self, pixel: dict, alert: int):
         x = pixel['x']
         y = pixel['y']
-        print(self.virginmap.getpixel((x, y)))
-        print(virgin)
         print(self.colors[255])
-        if not virgin and self.virginmap.getpixel((x, y)) == self.colors[255]:
-            self.virginmap.putpixel((x, y), self.colors[0])
-            print(f'Devirgin detected at {x}, {y}')
-            return
-        self.virginmap.putpixel((x, y), self.colors[0])
         color = self.colors[pixel['color']]
         print(f'\nGrief detected at {x}, {y}')
         template = self.templates[alert]
@@ -507,23 +500,24 @@ class Grief(commands.Cog):
             if self.check_grief(template, x, y, color):
                 griefed = True
                 if template[4] == 'realtime':
-                    await self.send_grief_alert(pixel, channel, template[5])
+                    await self.send_grief_alert(pixel, channel)
                 elif template[4] == 'high':
                     task = asyncio.create_task(self.check_undo(template, x, y, channel))
                 elif template[4] == 'normal':
                     self.add_to_dict(channel, pixel)
                     self.virginmap.putpixel((x, y), self.colors[0])
-        if griefed:
-            self.virginmap.putpixel((x, y), self.colors[0])
         # Update the virginmap
-        # self.virginmap.putpixel((x, y), self.colors[0])
+        self.virginmap.putpixel((x, y), self.colors[0])
 
 
     def check_grief(self, template: tuple, x: int, y: int, color: tuple) -> bool:
         img = template[0]
         x = x - template[2]
         y = y - template[3]
+        alert_virgin = template[5]
         if x < 0 or y < 0:
+            return False
+        if not alert_virgin and self.virginmap.getpixel((x, y)) == self.colors[255]:
             return False
         try:
             pixel = img.getpixel((x, y))
@@ -542,7 +536,7 @@ class Grief(commands.Cog):
             except KeyError:
                 print('Error in check_undo')
                 return
-            await self.send_grief_alert({'x': x, 'y': y, 'color': color}, server, template[5])
+            await self.send_grief_alert({'x': x, 'y': y, 'color': color}, server)
         else:
             print('Undo detected')
     
