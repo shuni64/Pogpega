@@ -511,13 +511,14 @@ class Grief(commands.Cog):
 
 
     def check_grief(self, template: tuple, x: int, y: int, color: tuple) -> bool:
+        is_virgin = self.virginmap.getpixel((x, y)) == self.colors[255]
         img = template[0]
         x = x - template[2]
         y = y - template[3]
         alert_virgin = template[5]
         if x < 0 or y < 0:
             return False
-        if not alert_virgin and self.virginmap.getpixel((x, y)) == self.colors[255]:
+        if not alert_virgin and is_virgin:
             return False
         try:
             pixel = img.getpixel((x, y))
