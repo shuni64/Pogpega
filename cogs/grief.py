@@ -68,11 +68,13 @@ class Grief(commands.Cog):
                     message = json.loads(message)
                     if message['type'] == 'pixel':
                         for pixel in message['pixels']:
+                            # capture previous color
+                            prev_color = self.board.getpixel((pixel['x'], pixel['y']))
                             # Add the pixel to the board
                             color = self.colors[pixel['color']]
                             self.board.putpixel((pixel['x'], pixel['y']), color)
                             # Check for griefs
-                            await self.check_griefs(pixel, color)
+                            await self.check_griefs(pixel, color, prev_color)
             except websockets.exceptions.ConnectionClosed:
                 continue
                             
@@ -220,6 +222,8 @@ class Grief(commands.Cog):
                 
     async def cog_load(self) -> None:
         self.board, self.virginmap = await self.fetch_board()
+        self.undo_tasks = {}
+        self.undo_lock = asyncio.Lock()
         self.task = asyncio.create_task(self.websock())
 
     def load_images(self): # TODO Palettize the images into index arrays
@@ -491,18 +495,31 @@ class Grief(commands.Cog):
 
         await ctx.response.send_message('Virgin pixel tracking updated')
 
-    async def check_griefs(self, pixel: dict, color: tuple):
+    async def check_griefs(self, pixel: dict, color: tuple, prev_color: tuple):
         x = pixel['x']
         y = pixel['y']
         # print(f'Pre-check: {self.virginmap.getpixel((x, y))}')
         griefed = False
         for channel, template in self.templates.items():
-            if self.check_grief(template, x, y, color):
+            if self.check_grief(template, x, y, color, prev_color):
                 griefed = True
                 if template[4] == 'realtime':
                     await self.send_grief_alert(pixel, channel)
                 elif template[4] == 'high':
-                    task = asyncio.create_task(self.check_undo(template, x, y, channel))
+                    # need to lock to avoid TOCTOU race condition
+                    async with self.undo_lock:
+                        pos = (x, y)
+                        if (task := self.undo_tasks.get(pos)) is not None:
+                            # update timestamp of existing task
+                            task.pogpega_pixel_timestamp = time.monotonic()
+                        else:
+                            # create new task to wait for undo timeout
+                            def discard_task(_task):
+                                del self.undo_tasks[pos]
+                            task = asyncio.create_task(self.check_undo(template, x, y, prev_color, channel))
+                            task.pogpega_pixel_timestamp = time.monotonic()
+                            task.add_done_callback(discard_task)
+                            self.undo_tasks[pos] = task;
                 elif template[4] == 'normal':
                     self.add_to_dict(channel, pixel)
                     self.virginmap.putpixel((x, y), self.colors[0])
@@ -510,28 +527,42 @@ class Grief(commands.Cog):
         self.virginmap.putpixel((x, y), self.colors[0])
 
 
-    def check_grief(self, template: tuple, x: int, y: int, color: tuple) -> bool:
+    def check_grief(self, template: tuple, x: int, y: int, color: tuple, prev_color: tuple) -> bool:
         is_virgin = self.virginmap.getpixel((x, y)) == self.colors[255]
         img = template[0]
         x = x - template[2]
         y = y - template[3]
         alert_virgin = template[5]
         if x < 0 or y < 0:
+            # pixel not on the template
             return False
         if not alert_virgin and is_virgin:
+            # pixel was virgin and virgin pixel alerts are disabled
             return False
         try:
-            pixel = img.getpixel((x, y))
-            if pixel[3] != 0 and pixel != color:
-                return True
-            return False
+            template_color = img.getpixel((x, y))
         except IndexError:
+            # pixel not on the template
             return False
+        if template_color[3] == 0:
+            # template pixel is transparent, ignore
+            return False
+        if prev_color == template_color and color != template_color:
+            # pixel changed from correct to incorrect => grief
+            return True
+        return False
         
-    async def check_undo(self, template: tuple, x: int, y: int, server: int):
-        await asyncio.sleep(6)
+    async def check_undo(self, template: tuple, x: int, y: int, prev_color: tuple, server: int):
+        async with self.undo_lock:
+            # acquire and release lock to wait for task setup
+            pass
+        task = asyncio.current_task()
+        # wait until last time any undo for this pixel could occur
+        # (6 seconds after the last placement)
+        while (undo_timeout := task.pogpega_pixel_timestamp + 6) > (cur_time := time.monotonic()):
+            await asyncio.sleep(undo_timeout - cur_time)
         new_color = self.board.getpixel((x, y))
-        if self.check_grief(template, x, y, new_color):
+        if self.check_grief(template, x, y, new_color, prev_color):
             try:
                 color = self.colors_to_index[new_color]
             except KeyError:
