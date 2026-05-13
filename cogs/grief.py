@@ -1,7 +1,7 @@
 import disnake as discord
 from disnake.ext import commands, tasks
 import sqlite3
-from PIL import Image, ImageColor
+from PIL import Image, ImageColor, ImageDraw, ImageFont
 import os
 import websockets
 import asyncio
@@ -646,30 +646,47 @@ class Grief(commands.Cog):
             arr = templatize(style, self.avo_res, self.palette)
             templatized = Image.fromarray(arr, mode='RGBA')
 
-            with BytesIO() as output:
-                self.avo_res.save(output, format='PNG')
-                s3.put_object(
-                    Bucket=BUCKET_PUBLIC,
-                    Key='avogadro_detemp.png',
-                    Body=output.getvalue(),
-                    ContentType='image/png',
-                    CacheControl='public, max-age=60'
-                )
-            with BytesIO() as output:
-                templatized.save(output, format='PNG')
-                s3.put_object(
-                    Bucket=BUCKET_PUBLIC,
-                    Key='avogadro.png',
-                    Body=output.getvalue(),
-                    ContentType='image/png',
-                    CacheControl='public, max-age=60'
-                )
+            await asyncio.to_thread(save_avogadro_image, self.avo_res, 'avogadro_detemp.png')
+            await asyncio.to_thread(save_avogadro_image, templatized, 'avogadro.png')
+            
+            await self.send_avogadro_update(old_result, result, changes)
             print(f'Avogadro updated with {changes} changes')
+        else:
+            print('No changes detected in avogadro update')
 
         await self.bot.change_presence(activity=discord.Activity(
                 type=discord.ActivityType.watching,
                 name=f'{changes} pixels change'
             ))
+    
+    async def send_avogadro_update(self, old_result: Image.Image, new_result: Image.Image, changes: int):
+        # Send the avogadro update to the channel
+        channel = await self.bot.fetch_channel(1234205530180812820)
+        print('fetched channel')
+        # Create a gif of the changes and overlay "old" and "new" text on the respective frames
+        frames = [old_result, new_result]
+        # for i in range(2):
+        #     draw = ImageDraw.Draw(frames[i])
+        #     text = "Old" if i == 0 else "New"
+        #     draw.text((5, 5), text, fill=(255, 255, 255))
+        # Paste an image on top of the frames if it exists at 0,0 with transparency
+        old = Image.open('other/avogadro/old.png')
+        new = Image.open('other/avogadro/new.png')
+        frames[0].paste(old, (0, 0), old)
+        frames[1].paste(new, (0, 0), new)
+
+        print('Created frames')
+        with BytesIO() as output:
+            frames[0].save(output, format='GIF', save_all=True, append_images=[frames[1]], loop=0, duration=1000, disposal=2)
+            output.seek(0)
+            gif = discord.File(output, filename='avogadro_update.gif')
+            # Create embed
+            embed = discord.Embed()
+            embed.title = f'Avogadro updated with {changes} changes'
+            embed.color = EMBED_COLOR
+            embed.set_image(url='attachment://avogadro_update.gif')
+            await channel.send(embed=embed, file=gif)
+
 
     @update_avogadro.before_loop
     async def before_update_avogadro(self):
@@ -872,34 +889,54 @@ class Grief(commands.Cog):
             await ctx.edit_original_message(content=f"An error occurred: {str(e)}")
 
 
-# TODO make this actually good
+# def crop_grief_image(image: Image, x: int, y: int) -> Image:
+#     WIDTH = 15
+#     HEIGHT = 6
+#     try:
+#         img = image.crop((x - WIDTH, y - HEIGHT, x + WIDTH, y + HEIGHT))
+#     except ValueError:
+#         try:
+#             img = image.crop((0, y - HEIGHT, x + WIDTH, y + HEIGHT))
+#         except ValueError:
+#             try:
+#                 img = image.crop((x - WIDTH, 0, x + WIDTH, y + HEIGHT))
+#             except ValueError:
+#                 try:
+#                     img = image.crop((0, 0, x + WIDTH, y + HEIGHT))
+#                 except ValueError:
+#                     try:
+#                         img = image.crop((x - WIDTH, y - HEIGHT, 2 * image.width - x - WIDTH, y + HEIGHT))
+#                     except ValueError:
+#                         try:
+#                             img = image.crop((x - WIDTH, y - HEIGHT, x + WIDTH, 2 * image.height - y - HEIGHT))
+#                         except ValueError:
+#                             try:
+#                                 img = image.crop((x - WIDTH, y - HEIGHT, 2 * image.width - x - WIDTH, 2 * image.height - y - HEIGHT))
+#                             except ValueError:
+#                                 img = Image.new('RGB', (1, 1), (85, 171, 237))
+#     img = img.resize((img.width * 10, img.height * 10), Image.Resampling.BOX)
+#     return img
+
 def crop_grief_image(image: Image, x: int, y: int) -> Image:
     WIDTH = 15
     HEIGHT = 6
     try:
-        img = image.crop((x - WIDTH, y - HEIGHT, x + WIDTH, y + HEIGHT))
+        img = image.crop((max(0, x - WIDTH), max(0, y - HEIGHT), min(image.width, x + WIDTH), min(image.height, y + HEIGHT)))
     except ValueError:
-        try:
-            img = image.crop((0, y - HEIGHT, x + WIDTH, y + HEIGHT))
-        except ValueError:
-            try:
-                img = image.crop((x - WIDTH, 0, x + WIDTH, y + HEIGHT))
-            except ValueError:
-                try:
-                    img = image.crop((0, 0, x + WIDTH, y + HEIGHT))
-                except ValueError:
-                    try:
-                        img = image.crop((x - WIDTH, y - HEIGHT, 2 * image.width - x - WIDTH, y + HEIGHT))
-                    except ValueError:
-                        try:
-                            img = image.crop((x - WIDTH, y - HEIGHT, x + WIDTH, 2 * image.height - y - HEIGHT))
-                        except ValueError:
-                            try:
-                                img = image.crop((x - WIDTH, y - HEIGHT, 2 * image.width - x - WIDTH, 2 * image.height - y - HEIGHT))
-                            except ValueError:
-                                img = Image.new('RGB', (1, 1), (85, 171, 237))
+        img = Image.new('RGB', (1, 1), (85, 171, 237))
     img = img.resize((img.width * 10, img.height * 10), Image.Resampling.BOX)
     return img
+
+def save_avogadro_image(image: Image.Image, filename: str):
+        with BytesIO() as output:
+            image.save(output, format='PNG')
+            s3.put_object(
+                    Bucket=BUCKET_PUBLIC,
+                    Key=filename,
+                    Body=output.getvalue(),
+                    ContentType='image/png',
+                    CacheControl='public, max-age=60'
+                )
 
     
 def setup(bot: commands.Bot):
