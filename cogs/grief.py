@@ -11,6 +11,7 @@ import aiohttp
 import numpy as np
 from io import BytesIO
 import time
+import traceback
 
 import boto3
 
@@ -65,16 +66,19 @@ class Grief(commands.Cog):
         async for socket in websockets.connect('wss://pxls.space/ws', extra_headers={"x-pxls-cfauth": pxls_auth}):
             try:
                 async for message in socket:
-                    message = json.loads(message)
-                    if message['type'] == 'pixel':
-                        for pixel in message['pixels']:
-                            # capture previous color
-                            prev_color = self.board.getpixel((pixel['x'], pixel['y']))
-                            # Add the pixel to the board
-                            color = self.colors[pixel['color']]
-                            self.board.putpixel((pixel['x'], pixel['y']), color)
-                            # Check for griefs
-                            await self.check_griefs(pixel, color, prev_color)
+                    try:
+                        message = json.loads(message)
+                        if message['type'] == 'pixel':
+                            for pixel in message['pixels']:
+                                # capture previous color
+                                prev_color = self.board.getpixel((pixel['x'], pixel['y']))
+                                # Add the pixel to the board
+                                color = self.colors[pixel['color']]
+                                self.board.putpixel((pixel['x'], pixel['y']), color)
+                                # Check for griefs
+                                await self.check_griefs(pixel, color, prev_color)
+                    except Exception:
+                        print("Caught exception during message handling:", traceback.format_exc(), end='')
             except websockets.exceptions.ConnectionClosed:
                 continue
                             
