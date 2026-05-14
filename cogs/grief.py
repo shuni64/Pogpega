@@ -501,34 +501,36 @@ class Grief(commands.Cog):
         # print(f'Pre-check: {self.virginmap.getpixel((x, y))}')
         griefed = False
         for channel, template in self.templates.items():
-            if self.check_grief(template, x, y, color, prev_color):
+            # always start async task for "high" alert level
+            # otherwise an undo of a non-grief starts a new async task with a wrong prev_color, breaking undo tracking and wrongly sending an alert
+            if template[4] == 'high':
+                # need to lock to avoid TOCTOU race condition
+                async with self.undo_lock:
+                    pos = (x, y)
+                    if (task := self.undo_tasks.get(pos)) is not None:
+                        # update timestamp of existing task
+                        task.pogpega_pixel_timestamp = time.monotonic()
+                    else:
+                        # create new task to wait for undo timeout
+                        def discard_task(_task):
+                            del self.undo_tasks[pos]
+                        was_virgin = self.virginmap.getpixel((x, y)) == self.colors[255]
+                        task = asyncio.create_task(self.check_undo(template, x, y, prev_color, was_virgin, channel))
+                        task.pogpega_pixel_timestamp = time.monotonic()
+                        task.add_done_callback(discard_task)
+                        self.undo_tasks[pos] = task;
+            elif self.check_grief(template, x, y, color, prev_color):
                 griefed = True
                 if template[4] == 'realtime':
                     await self.send_grief_alert(pixel, channel)
-                elif template[4] == 'high':
-                    # need to lock to avoid TOCTOU race condition
-                    async with self.undo_lock:
-                        pos = (x, y)
-                        if (task := self.undo_tasks.get(pos)) is not None:
-                            # update timestamp of existing task
-                            task.pogpega_pixel_timestamp = time.monotonic()
-                        else:
-                            # create new task to wait for undo timeout
-                            def discard_task(_task):
-                                del self.undo_tasks[pos]
-                            task = asyncio.create_task(self.check_undo(template, x, y, prev_color, channel))
-                            task.pogpega_pixel_timestamp = time.monotonic()
-                            task.add_done_callback(discard_task)
-                            self.undo_tasks[pos] = task;
                 elif template[4] == 'normal':
                     self.add_to_dict(channel, pixel)
-                    self.virginmap.putpixel((x, y), self.colors[0])
         # Update the virginmap
         self.virginmap.putpixel((x, y), self.colors[0])
 
 
-    def check_grief(self, template: tuple, x: int, y: int, color: tuple, prev_color: tuple) -> bool:
-        is_virgin = self.virginmap.getpixel((x, y)) == self.colors[255]
+    def check_grief(self, template: tuple, x: int, y: int, color: tuple, prev_color: tuple, was_virgin: bool | None = None) -> bool:
+        was_virgin = self.virginmap.getpixel((x, y)) == self.colors[255] if was_virgin is None else was_virgin
         img = template[0]
         x = x - template[2]
         y = y - template[3]
@@ -536,7 +538,7 @@ class Grief(commands.Cog):
         if x < 0 or y < 0:
             # pixel not on the template
             return False
-        if not alert_virgin and is_virgin:
+        if not alert_virgin and was_virgin:
             # pixel was virgin and virgin pixel alerts are disabled
             return False
         try:
@@ -551,8 +553,8 @@ class Grief(commands.Cog):
             # pixel changed from correct to incorrect => grief
             return True
         return False
-        
-    async def check_undo(self, template: tuple, x: int, y: int, prev_color: tuple, server: int):
+
+    async def check_undo(self, template: tuple, x: int, y: int, prev_color: tuple, was_virgin: bool, server: int):
         async with self.undo_lock:
             # acquire and release lock to wait for task setup
             pass
@@ -562,15 +564,13 @@ class Grief(commands.Cog):
         while (undo_timeout := task.pogpega_pixel_timestamp + 6) > (cur_time := time.monotonic()):
             await asyncio.sleep(undo_timeout - cur_time)
         new_color = self.board.getpixel((x, y))
-        if self.check_grief(template, x, y, new_color, prev_color):
+        if self.check_grief(template, x, y, new_color, prev_color, was_virgin):
             try:
                 color = self.colors_to_index[new_color]
             except KeyError:
                 print('Error in check_undo')
                 return
             await self.send_grief_alert({'x': x, 'y': y, 'color': color}, server)
-        else:
-            print('Undo detected')
     
     def rgb_to_hex(self, rgb: tuple) -> str:
         return f'{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}'
