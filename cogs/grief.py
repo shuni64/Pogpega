@@ -504,21 +504,22 @@ class Grief(commands.Cog):
             # always start async task for "high" alert level
             # otherwise an undo of a non-grief starts a new async task with a wrong prev_color, breaking undo tracking and wrongly sending an alert
             if template[4] == 'high':
-                # need to lock to avoid TOCTOU race condition
-                async with self.undo_lock:
-                    pos = (x, y)
-                    if (task := self.undo_tasks.get(channel, {}).get(pos)) is not None:
-                        # update timestamp of existing task
-                        task.pogpega_pixel_timestamp = time.monotonic()
-                    else:
-                        # create new task to wait for undo timeout
-                        def discard_task(_task):
-                            del self.undo_tasks[channel][pos]
-                        was_virgin = self.virginmap.getpixel((x, y)) == self.colors[255]
-                        task = asyncio.create_task(self.check_undo(template, x, y, prev_color, was_virgin, channel))
-                        task.pogpega_pixel_timestamp = time.monotonic()
-                        task.add_done_callback(discard_task)
-                        self.undo_tasks.setdefault(channel, {})[pos] = task;
+                if self.template_has_pixel(template, x, y):
+                    # need to lock to avoid TOCTOU race condition
+                    async with self.undo_lock:
+                        pos = (x, y)
+                        if (task := self.undo_tasks.get(channel, {}).get(pos)) is not None:
+                            # update timestamp of existing task
+                            task.pogpega_pixel_timestamp = time.monotonic()
+                        else:
+                            # create new task to wait for undo timeout
+                            def discard_task(_task):
+                                del self.undo_tasks[channel][pos]
+                            was_virgin = self.virginmap.getpixel((x, y)) == self.colors[255]
+                            task = asyncio.create_task(self.check_undo(template, x, y, prev_color, was_virgin, channel))
+                            task.pogpega_pixel_timestamp = time.monotonic()
+                            task.add_done_callback(discard_task)
+                            self.undo_tasks.setdefault(channel, {})[pos] = task;
             elif self.check_grief(template, x, y, color, prev_color):
                 griefed = True
                 if template[4] == 'realtime':
@@ -530,25 +531,19 @@ class Grief(commands.Cog):
 
 
     def check_grief(self, template: tuple, x: int, y: int, color: tuple, prev_color: tuple, was_virgin: bool | None = None) -> bool:
+        if not self.template_has_pixel(template, x, y):
+            # pixel not on template, ignore
+            return False
+
         was_virgin = self.virginmap.getpixel((x, y)) == self.colors[255] if was_virgin is None else was_virgin
         img = template[0]
         x = x - template[2]
         y = y - template[3]
         alert_virgin = template[5]
-        if x < 0 or y < 0:
-            # pixel not on the template
-            return False
         if not alert_virgin and was_virgin:
             # pixel was virgin and virgin pixel alerts are disabled
             return False
-        try:
-            template_color = img.getpixel((x, y))
-        except IndexError:
-            # pixel not on the template
-            return False
-        if template_color[3] == 0:
-            # template pixel is transparent, ignore
-            return False
+        template_color = img.getpixel((x, y))
         if prev_color == template_color and color != template_color:
             # pixel changed from correct to incorrect => grief
             return True
@@ -571,6 +566,21 @@ class Grief(commands.Cog):
                 print('Error in check_undo')
                 return
             await self.send_grief_alert({'x': x, 'y': y, 'color': color}, server)
+
+    # returns True if the pixel is in the bounds of the template and is not transparent
+    def template_has_pixel(self, template: tuple, x: int, y: int):
+        # template image
+        img = template[0]
+        # coords relative to template origin
+        relX = x - template[2]
+        relY = y - template[3]
+        return (
+            relX >= 0 and
+            relY >= 0 and
+            relX < img.width and
+            relY < img.height and
+            img.getpixel((relX, relY))[3] != 0
+        )
     
     def rgb_to_hex(self, rgb: tuple) -> str:
         return f'{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}'
