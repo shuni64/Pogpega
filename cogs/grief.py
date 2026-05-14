@@ -507,18 +507,18 @@ class Grief(commands.Cog):
                 # need to lock to avoid TOCTOU race condition
                 async with self.undo_lock:
                     pos = (x, y)
-                    if (task := self.undo_tasks.get(pos)) is not None:
+                    if (task := self.undo_tasks.get(channel, {}).get(pos)) is not None:
                         # update timestamp of existing task
                         task.pogpega_pixel_timestamp = time.monotonic()
                     else:
                         # create new task to wait for undo timeout
                         def discard_task(_task):
-                            del self.undo_tasks[pos]
+                            del self.undo_tasks[channel][pos]
                         was_virgin = self.virginmap.getpixel((x, y)) == self.colors[255]
                         task = asyncio.create_task(self.check_undo(template, x, y, prev_color, was_virgin, channel))
                         task.pogpega_pixel_timestamp = time.monotonic()
                         task.add_done_callback(discard_task)
-                        self.undo_tasks[pos] = task;
+                        self.undo_tasks.setdefault(channel, {})[pos] = task;
             elif self.check_grief(template, x, y, color, prev_color):
                 griefed = True
                 if template[4] == 'realtime':
