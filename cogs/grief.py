@@ -701,7 +701,7 @@ class Grief(commands.Cog):
 
         await self.bot.change_presence(activity=discord.Activity(
                 type=discord.ActivityType.watching,
-                name=f'{changes} pixels change'
+                name=f'Watching {changes} pixels change'
             ))
     
     async def send_avogadro_update(self, old_result: Image.Image, new_result: Image.Image, changes: int):
@@ -709,7 +709,7 @@ class Grief(commands.Cog):
         channel = await self.bot.fetch_channel(1234205530180812820)
         print('fetched channel')
         # Create a gif of the changes and overlay "old" and "new" text on the respective frames
-        frames = [old_result, new_result]
+        frames = [old_result.copy(), new_result.copy()]
         # for i in range(2):
         #     draw = ImageDraw.Draw(frames[i])
         #     text = "Old" if i == 0 else "New"
